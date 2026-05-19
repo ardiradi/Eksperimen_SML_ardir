@@ -1,9 +1,12 @@
 """
 automate_ardir.py
-Automated Data Preprocessing Pipeline for Wine Quality Dataset.
+Automated Data Preprocessing Pipeline for Heart Disease Dataset.
 
 Script ini mengonversi langkah-langkah preprocessing dari notebook eksperimen
 menjadi pipeline otomatis yang siap digunakan untuk pelatihan model.
+
+Dataset: Heart Disease (Cleveland) - UCI ML Repository
+Target: Binary classification (0 = no disease, 1 = disease)
 
 Author: ardir
 """
@@ -21,46 +24,39 @@ warnings.filterwarnings('ignore')
 # ============================================================
 # 1. DATA LOADING
 # ============================================================
-def load_data(red_path=None, white_path=None):
+def load_data(file_path=None):
     """
-    Memuat dataset Wine Quality dari file CSV atau URL UCI ML Repository.
+    Memuat dataset Heart Disease dari file CSV atau URL UCI ML Repository.
     
     Parameters
     ----------
-    red_path : str, optional
-        Path ke file red wine CSV. Jika None, download dari UCI.
-    white_path : str, optional
-        Path ke file white wine CSV. Jika None, download dari UCI.
+    file_path : str, optional
+        Path ke file CSV. Jika None, download dari UCI.
     
     Returns
     -------
     pd.DataFrame
-        DataFrame gabungan red dan white wine dengan kolom 'wine_type'.
+        DataFrame Heart Disease dataset.
     """
-    RED_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-red.csv"
-    WHITE_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-white.csv"
+    UCI_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/heart-disease/processed.cleveland.data"
     
-    if red_path and os.path.exists(red_path):
-        df_red = pd.read_csv(red_path, sep=';')
+    column_names = [
+        'age', 'sex', 'cp', 'trestbps', 'chol', 'fbs',
+        'restecg', 'thalach', 'exang', 'oldpeak', 'slope',
+        'ca', 'thal', 'target'
+    ]
+    
+    if file_path and os.path.exists(file_path):
+        df = pd.read_csv(file_path, names=column_names, na_values='?')
     else:
-        print("[INFO] Mengunduh dataset red wine dari UCI...")
-        df_red = pd.read_csv(RED_URL, sep=';')
+        print("[INFO] Mengunduh dataset Heart Disease dari UCI...")
+        df = pd.read_csv(UCI_URL, names=column_names, na_values='?')
     
-    if white_path and os.path.exists(white_path):
-        df_white = pd.read_csv(white_path, sep=';')
-    else:
-        print("[INFO] Mengunduh dataset white wine dari UCI...")
-        df_white = pd.read_csv(WHITE_URL, sep=';')
-    
-    # Tambahkan kolom wine_type
-    df_red['wine_type'] = 'red'
-    df_white['wine_type'] = 'white'
-    
-    # Gabungkan dataset
-    df = pd.concat([df_red, df_white], axis=0, ignore_index=True)
+    # Konversi target menjadi binary (0 = no disease, 1 = disease)
+    df['target'] = (df['target'] > 0).astype(int)
     
     print(f"[INFO] Dataset dimuat: {df.shape[0]} baris, {df.shape[1]} kolom")
-    print(f"[INFO] Red wine: {len(df_red)}, White wine: {len(df_white)}")
+    print(f"[INFO] No Disease: {(df['target'] == 0).sum()}, Disease: {(df['target'] == 1).sum()}")
     
     return df
 
@@ -93,6 +89,11 @@ def clean_data(df):
         for col in num_cols:
             if df_clean[col].isnull().sum() > 0:
                 df_clean[col].fillna(df_clean[col].median(), inplace=True)
+        # Isi missing values kategorikal dengan modus
+        cat_cols = df_clean.select_dtypes(exclude=[np.number]).columns
+        for col in cat_cols:
+            if df_clean[col].isnull().sum() > 0:
+                df_clean[col].fillna(df_clean[col].mode()[0], inplace=True)
     else:
         print("[INFO] Tidak ada missing values.")
     
@@ -110,12 +111,14 @@ def clean_data(df):
 # ============================================================
 def engineer_features(df):
     """
-    Membuat fitur baru dan mengkategorikan target variable.
+    Membuat fitur baru berdasarkan domain knowledge kardiologi.
     
-    Quality di-bin menjadi 3 kategori:
-    - 'low' (quality 3-4)
-    - 'medium' (quality 5-6)
-    - 'high' (quality 7-9)
+    Fitur baru yang dibuat:
+    - age_group: Kategori umur (young, middle, senior, elderly)
+    - heart_rate_reserve: Perbedaan max heart rate dengan resting
+    - bp_category: Kategori tekanan darah
+    - risk_score: Skor risiko gabungan
+    - cholesterol_age_ratio: Rasio kolesterol terhadap umur
     
     Parameters
     ----------
@@ -128,25 +131,23 @@ def engineer_features(df):
     df_eng = df.copy()
     
     # Buat fitur baru
-    df_eng['total_acidity'] = df_eng['fixed acidity'] + df_eng['volatile acidity']
-    df_eng['free_sulfur_ratio'] = (
-        df_eng['free sulfur dioxide'] / df_eng['total sulfur dioxide'].replace(0, 1)
-    )
-    df_eng['alcohol_density_ratio'] = df_eng['alcohol'] / df_eng['density'].replace(0, 1)
+    # 1. Heart rate reserve (estimasi: 220 - age - resting BP proxy)
+    df_eng['heart_rate_reserve'] = df_eng['thalach'] / (220 - df_eng['age']).replace(0, 1)
     
-    # Kategorikan quality menjadi 3 kelas
-    def categorize_quality(q):
-        if q <= 4:
-            return 'low'
-        elif q <= 6:
-            return 'medium'
-        else:
-            return 'high'
+    # 2. Cholesterol-age ratio
+    df_eng['cholesterol_age_ratio'] = df_eng['chol'] / df_eng['age'].replace(0, 1)
     
-    df_eng['quality_category'] = df_eng['quality'].apply(categorize_quality)
+    # 3. BP-cholesterol interaction
+    df_eng['bp_chol_interaction'] = df_eng['trestbps'] * df_eng['chol'] / 10000
+    
+    # 4. Exercise-induced risk (oldpeak * exang)
+    df_eng['exercise_risk'] = df_eng['oldpeak'] * (df_eng['exang'] + 1)
+    
+    # 5. Age-sex risk factor
+    df_eng['age_sex_risk'] = df_eng['age'] * (1 + df_eng['sex'] * 0.2)
     
     print(f"[INFO] Feature engineering selesai. Total fitur: {df_eng.shape[1]}")
-    print(f"[INFO] Distribusi kelas:\n{df_eng['quality_category'].value_counts()}")
+    print(f"[INFO] Distribusi target:\n{df_eng['target'].value_counts()}")
     
     return df_eng
 
@@ -156,7 +157,8 @@ def engineer_features(df):
 # ============================================================
 def encode_features(df):
     """
-    Encode fitur kategorikal (wine_type dan quality_category).
+    Encode fitur kategorikal jika diperlukan.
+    Sebagian besar fitur Heart Disease sudah dalam format numerik.
     
     Parameters
     ----------
@@ -170,18 +172,21 @@ def encode_features(df):
     df_enc = df.copy()
     encoders = {}
     
-    # Encode wine_type
-    le_wine = LabelEncoder()
-    df_enc['wine_type'] = le_wine.fit_transform(df_enc['wine_type'])
-    encoders['wine_type'] = le_wine
+    # Target sudah binary (0/1), tidak perlu encoding
+    # Simpan label mapping untuk referensi
+    le_target = LabelEncoder()
+    le_target.classes_ = np.array(['no_disease', 'disease'])
+    encoders['target'] = le_target
     
-    # Encode quality_category sebagai target
-    le_quality = LabelEncoder()
-    df_enc['quality_label'] = le_quality.fit_transform(df_enc['quality_category'])
-    encoders['quality_category'] = le_quality
+    # Pastikan semua kolom numerik
+    for col in df_enc.columns:
+        if df_enc[col].dtype == 'object':
+            le = LabelEncoder()
+            df_enc[col] = le.fit_transform(df_enc[col].astype(str))
+            encoders[col] = le
     
     print(f"[INFO] Encoding selesai.")
-    print(f"[INFO] Label mapping: {dict(zip(le_quality.classes_, le_quality.transform(le_quality.classes_)))}")
+    print(f"[INFO] Label mapping: {{0: 'no_disease', 1: 'disease'}}")
     
     return df_enc, encoders
 
@@ -189,7 +194,7 @@ def encode_features(df):
 # ============================================================
 # 5. SCALING & SPLITTING
 # ============================================================
-def scale_and_split(df, target_col='quality_label', test_size=0.2, val_size=0.1, random_state=42):
+def scale_and_split(df, target_col='target', test_size=0.2, val_size=0.1, random_state=42):
     """
     Melakukan scaling pada fitur numerik dan membagi data menjadi
     train, validation, dan test set.
@@ -208,7 +213,7 @@ def scale_and_split(df, target_col='quality_label', test_size=0.2, val_size=0.1,
         Dictionary berisi X_train, X_val, X_test, y_train, y_val, y_test, scaler.
     """
     # Tentukan fitur dan target
-    drop_cols = [target_col, 'quality', 'quality_category']
+    drop_cols = [target_col]
     drop_cols = [c for c in drop_cols if c in df.columns]
     
     X = df.drop(columns=drop_cols)
@@ -249,7 +254,7 @@ def scale_and_split(df, target_col='quality_label', test_size=0.2, val_size=0.1,
 # ============================================================
 # 6. SAVE PREPROCESSED DATA
 # ============================================================
-def save_preprocessed(data_dict, encoders, output_dir='wine_quality_preprocessing'):
+def save_preprocessed(data_dict, encoders, output_dir='heart_disease_preprocessing'):
     """
     Menyimpan data yang sudah dipreproses ke folder output.
     
@@ -284,7 +289,7 @@ def save_preprocessed(data_dict, encoders, output_dir='wine_quality_preprocessin
 # ============================================================
 # MAIN PIPELINE
 # ============================================================
-def run_preprocessing_pipeline(output_dir='wine_quality_preprocessing'):
+def run_preprocessing_pipeline(output_dir='heart_disease_preprocessing'):
     """
     Menjalankan keseluruhan pipeline preprocessing secara otomatis.
     
@@ -299,7 +304,7 @@ def run_preprocessing_pipeline(output_dir='wine_quality_preprocessing'):
         Dictionary berisi data yang siap dilatih.
     """
     print("=" * 60)
-    print("  WINE QUALITY - AUTOMATED PREPROCESSING PIPELINE")
+    print("  HEART DISEASE - AUTOMATED PREPROCESSING PIPELINE")
     print("=" * 60)
     
     # Step 1: Load data
